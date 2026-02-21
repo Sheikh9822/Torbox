@@ -1,0 +1,138 @@
+name: Cloud Uploader (Drive + Telegram)
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: "Direct ZIP URL"
+        required: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+
+    # 1) Install tools
+    - name: Install dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y unzip curl jq ffmpeg
+        curl https://rclone.org/install.sh | sudo bash
+
+    # 2) Workspace
+    - name: Prepare workspace
+      run: |
+        mkdir -p work
+        cd work
+
+    # 3) Download ZIP (resumable)
+    - name: Download ZIP
+      run: |
+        cd work
+        echo "Downloading..."
+        curl -L -C - "${{ github.event.inputs.zip_url }}" -o archive.zip
+
+    # 4) Extract
+    - name: Extract ZIP
+      run: |
+        cd work
+        mkdir -p extracted
+        unzip -o archive.zip -d extracted
+
+    # 5) Configure rclone OAuth
+    - name: Configure rclone
+      run: |
+        mkdir -p ~/.config/rclone
+        cat > ~/.config/rclone/rclone.conf <<EOF
+        [drive]
+        type = drive
+        client_id = ${{ secrets.GDRIVE_CLIENT_ID }}
+        client_secret = ${{ secrets.GDRIVE_CLIENT_SECRET }}
+        scope = drive
+        token = {"access_token":"ya29.fake","token_type":"Bearer","refresh_token":"${{ secrets.GDRIVE_REFRESH_TOKEN }}","expiry":"2000-01-01T00:00:00Z"}
+        EOF
+
+    # 6) Upload to Google Drive (resumable)
+    - name: Upload to Drive (resume safe)
+      run: |
+        rclone copy work/extracted drive:Uploads \
+          --progress \
+          --transfers 2 \
+          --checkers 4 \
+          --drive-chunk-size 64M \
+          --retries 999 \
+          --low-level-retries 999 \
+          --timeout 10m \
+          --contimeout 10m \
+          --ignore-existing \
+          --size-only \
+          --inplace \
+          --log-file upload.log \
+          --log-level INFO
+
+    # 7) Prepare Telegram files (split >2GB)
+    - name: Split files for Telegram
+      run: |
+        cd work/extracted
+        mkdir -p tg_ready
+
+        find . -type f | while read file; do
+          size=$(stat -c%s "$file")
+          if [ "$size" -gt 1900000000 ]; then
+            echo "Splitting $file"
+            split -b 1900M "$file" "tg_ready/$(basename "$file").part_"
+          else
+            cp "$file" tg_ready/
+          fi
+        done
+
+    # 8) Upload to Telegram with progress + resume
+    - name: Upload to Telegram
+      env:
+        BOT: ${{ secrets.BOT_TOKEN }}
+        CHAT: ${{ secrets.CHAT_ID }}
+      run: |
+        cd work/extracted/tg_ready
+
+        touch sent.txt
+
+        TOTAL=$(find . -type f ! -name sent.txt | wc -l)
+        SENT=$(grep -c "" sent.txt || true)
+
+        MSG=$(curl -s -X POST "https://api.telegram.org/bot$BOT/sendMessage" \
+          -d chat_id=$CHAT \
+          -d text="Starting upload: $SENT / $TOTAL")
+
+        MSG_ID=$(echo $MSG | jq -r '.result.message_id')
+
+        COUNT=$SENT
+
+        find . -type f ! -name sent.txt | sort | while read file; do
+          if grep -Fxq "$file" sent.txt; then
+            continue
+          fi
+
+          echo "Sending $file"
+
+          curl -s -F chat_id=$CHAT \
+               -F document=@"$file" \
+               https://api.telegram.org/bot$BOT/sendDocument
+
+          echo "$file" >> sent.txt
+          COUNT=$((COUNT+1))
+          PERCENT=$((COUNT*100/TOTAL))
+
+          curl -s -X POST "https://api.telegram.org/bot$BOT/editMessageText" \
+            -d chat_id=$CHAT \
+            -d message_id=$MSG_ID \
+            -d text="Uploading: $COUNT / $TOTAL ($PERCENT%)"
+
+          sleep 6
+        done
+
+        curl -s -X POST "https://api.telegram.org/bot$BOT/editMessageText" \
+          -d chat_id=$CHAT \
+          -d message_id=$MSG_ID \
+          -d text="Upload complete: $TOTAL / $TOTAL"
