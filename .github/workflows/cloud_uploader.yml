@@ -57,7 +57,7 @@ jobs:
     # 6) Upload to Google Drive (resumable)
     - name: Upload to Drive (resume safe)
       run: |
-        rclone copy work/extracted drive:Uploads \
+        rclone copy work/extracted drive:Telebot \
           --progress \
           --transfers 2 \
           --checkers 4 \
