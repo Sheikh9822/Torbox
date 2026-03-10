@@ -49,31 +49,15 @@ jobs:
     - name: Prepare workspace
       run: mkdir -p work
 
-    # 5) Download ZIP (resumable) — cache keyed on URL
-    - name: Cache downloaded ZIP
-      id: cache-zip
-      uses: actions/cache@v4
-      with:
-        path: work/archive.zip
-        key: zip-${{ hashFiles('') }}-${{ github.event.inputs.zip_url }}
-
+    # 5) Download ZIP
     - name: Download ZIP
-      if: steps.cache-zip.outputs.cache-hit != 'true'
       run: |
         cd work
         echo "Downloading..."
         curl -L -C - "${{ github.event.inputs.zip_url }}" -o archive.zip
 
-    # 6) Extract (cache keyed on ZIP)
-    - name: Cache extracted files
-      id: cache-extracted
-      uses: actions/cache@v4
-      with:
-        path: work/extracted
-        key: extracted-${{ github.event.inputs.zip_url }}
-
+    # 6) Extract ZIP
     - name: Extract ZIP
-      if: steps.cache-extracted.outputs.cache-hit != 'true'
       run: |
         cd work
         mkdir -p extracted
@@ -110,17 +94,8 @@ jobs:
           --log-file upload.log \
           --log-level INFO
 
-    # 9) Cache split/tg_ready files
-    - name: Cache Telegram-ready files
-      id: cache-tg
-      uses: actions/cache@v4
-      with:
-        path: work/extracted/tg_ready
-        key: tg-ready-${{ github.event.inputs.zip_url }}
-
-    # 10) Prepare Telegram files (split >1.9GB)
+    # 9) Prepare Telegram files (split >1.9GB)
     - name: Split files for Telegram
-      if: steps.cache-tg.outputs.cache-hit != 'true'
       run: |
         cd work/extracted
         mkdir -p tg_ready
@@ -135,7 +110,7 @@ jobs:
           fi
         done
 
-    # 11) Cache sent.txt for upload resumability
+    # 10) Cache sent.txt — allows Telegram upload to resume across retries
     - name: Cache Telegram sent list
       uses: actions/cache@v4
       with:
@@ -144,7 +119,7 @@ jobs:
         restore-keys: |
           tg-sent-${{ github.event.inputs.zip_url }}-
 
-    # 12) Upload to Telegram (SAFE — no secrets in logs)
+    # 11) Upload to Telegram (SAFE — no secrets in logs)
     - name: Upload to Telegram
       env:
         BOT: ${{ secrets.BOT_TOKEN }}
