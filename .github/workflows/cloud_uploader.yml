@@ -14,34 +14,72 @@ jobs:
 
     steps:
 
-    # 1) Install tools
+    # 1) Cache apt packages
+    - name: Cache apt packages
+      id: cache-apt
+      uses: actions/cache@v4
+      with:
+        path: |
+          /var/cache/apt/archives
+          /var/lib/apt/lists
+        key: apt-${{ runner.os }}-unzip-curl-jq-ffmpeg
+        restore-keys: |
+          apt-${{ runner.os }}-
+
+    # 2) Cache rclone binary
+    - name: Cache rclone
+      id: cache-rclone
+      uses: actions/cache@v4
+      with:
+        path: /usr/bin/rclone
+        key: rclone-${{ runner.os }}-v1.68
+
+    # 3) Install tools (skipped if fully cached)
     - name: Install dependencies
+      if: steps.cache-apt.outputs.cache-hit != 'true'
       run: |
         sudo apt update
         sudo apt install -y unzip curl jq ffmpeg
-        curl https://rclone.org/install.sh | sudo bash
 
-    # 2) Workspace
+    - name: Install rclone
+      if: steps.cache-rclone.outputs.cache-hit != 'true'
+      run: curl https://rclone.org/install.sh | sudo bash
+
+    # 4) Workspace
     - name: Prepare workspace
-      run: |
-        mkdir -p work
-        cd work
+      run: mkdir -p work
 
-    # 3) Download ZIP (resumable)
+    # 5) Download ZIP (resumable) — cache keyed on URL
+    - name: Cache downloaded ZIP
+      id: cache-zip
+      uses: actions/cache@v4
+      with:
+        path: work/archive.zip
+        key: zip-${{ hashFiles('') }}-${{ github.event.inputs.zip_url }}
+
     - name: Download ZIP
+      if: steps.cache-zip.outputs.cache-hit != 'true'
       run: |
         cd work
         echo "Downloading..."
         curl -L -C - "${{ github.event.inputs.zip_url }}" -o archive.zip
 
-    # 4) Extract
+    # 6) Extract (cache keyed on ZIP)
+    - name: Cache extracted files
+      id: cache-extracted
+      uses: actions/cache@v4
+      with:
+        path: work/extracted
+        key: extracted-${{ github.event.inputs.zip_url }}
+
     - name: Extract ZIP
+      if: steps.cache-extracted.outputs.cache-hit != 'true'
       run: |
         cd work
         mkdir -p extracted
         unzip -o archive.zip -d extracted
 
-    # 5) Configure rclone OAuth
+    # 7) Configure rclone OAuth
     - name: Configure rclone
       run: |
         mkdir -p ~/.config/rclone
@@ -54,7 +92,7 @@ jobs:
         token = {"access_token":"ya29.fake","token_type":"Bearer","refresh_token":"${{ secrets.GDRIVE_REFRESH_TOKEN }}","expiry":"2000-01-01T00:00:00Z"}
         EOF
 
-    # 6) Upload to Google Drive (resumable)
+    # 8) Upload to Google Drive (resumable)
     - name: Upload to Drive (resume safe)
       run: |
         rclone copy work/extracted drive:Telebot \
@@ -72,23 +110,41 @@ jobs:
           --log-file upload.log \
           --log-level INFO
 
-    # 7) Prepare Telegram files (split >2GB)
+    # 9) Cache split/tg_ready files
+    - name: Cache Telegram-ready files
+      id: cache-tg
+      uses: actions/cache@v4
+      with:
+        path: work/extracted/tg_ready
+        key: tg-ready-${{ github.event.inputs.zip_url }}
+
+    # 10) Prepare Telegram files (split >1.9GB)
     - name: Split files for Telegram
+      if: steps.cache-tg.outputs.cache-hit != 'true'
       run: |
         cd work/extracted
         mkdir -p tg_ready
 
-        find . -type f | while read file; do
+        find . -type f ! -path "./tg_ready/*" | while read file; do
           size=$(stat -c%s "$file")
           if [ "$size" -gt 1900000000 ]; then
-            echo "Splitting large file"
+            echo "Splitting large file: $file"
             split -b 1900M "$file" "tg_ready/$(basename "$file").part_"
           else
             cp "$file" tg_ready/
           fi
         done
 
-    # 8) Upload to Telegram (SAFE — no secrets in logs)
+    # 11) Cache sent.txt for upload resumability
+    - name: Cache Telegram sent list
+      uses: actions/cache@v4
+      with:
+        path: work/extracted/tg_ready/sent.txt
+        key: tg-sent-${{ github.event.inputs.zip_url }}-${{ github.run_id }}
+        restore-keys: |
+          tg-sent-${{ github.event.inputs.zip_url }}-
+
+    # 12) Upload to Telegram (SAFE — no secrets in logs)
     - name: Upload to Telegram
       env:
         BOT: ${{ secrets.BOT_TOKEN }}
